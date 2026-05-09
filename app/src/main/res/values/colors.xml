@@ -3,5 +3,9 @@
     <color name="colorPrimary">#E53935</color>
     <color name="colorPrimaryDark">#B71C1C</color>
     <color name="colorAccent">#FF6D00</color>
-    <color name="colorBackground">#000000</color>
+    <color name="colorBackground">#0F0F0F</color>
+    <color name="colorCardBg">#1C1C1C</color>
+    <color name="colorSearchBg">#212121</color>
+    <color name="white">#FFFFFF</color>
+    <color name="grey_text">#AAAAAA</color>
 </resources>

@@ -4,19 +4,19 @@ import android.os.Bundle;
 import androidx.fragment.app.FragmentActivity;
 
 /**
- * Shell activity — hosts MainFragment (the Leanback BrowseSupportFragment).
+ * Shell activity that hosts {@link SearchFragment}.
  */
-public class MainActivity extends FragmentActivity {
+public class SearchActivity extends FragmentActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+        setContentView(R.layout.activity_search);
 
         if (savedInstanceState == null) {
             getSupportFragmentManager()
                 .beginTransaction()
-                .replace(R.id.main_browse_fragment, new MainFragment())
+                .replace(R.id.search_fragment, new SearchFragment())
                 .commitAllowingStateLoss();
         }
     }

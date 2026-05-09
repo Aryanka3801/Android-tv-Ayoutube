@@ -1,8 +1,26 @@
-# Add project specific ProGuard rules here.
-# By default, the flags in this file are appended to flags specified
-# in the proguard-android-optimize.txt file included with the Android SDK.
+# NewPipe Extractor
+-keep class org.schabi.newpipe.extractor.** { *; }
+-dontwarn org.schabi.newpipe.extractor.**
 
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ExoPlayer / Media3
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**
 
-# Add any project specific keep rules here:
+# OkHttp
+-dontwarn okhttp3.**
+-dontwarn okio.**
+
+# Gson
+-keepattributes Signature
+-keepattributes *Annotation*
+-keep class com.google.gson.** { *; }
+
+# RxJava
+-dontwarn io.reactivex.rxjava3.**
+
+# Keep VideoItem (serialized via Intent)
+-keep class com.example.myapp.model.VideoItem { *; }
+
+# Glide
+-keep public class * implements com.bumptech.glide.module.GlideModule
+-keep class com.bumptech.glide.** { *; }
