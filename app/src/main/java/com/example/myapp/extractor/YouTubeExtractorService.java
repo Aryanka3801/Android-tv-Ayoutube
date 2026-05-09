@@ -5,7 +5,6 @@ import android.util.Log;
 import com.example.myapp.model.VideoItem;
 
 import org.schabi.newpipe.extractor.InfoItem;
-import org.schabi.newpipe.extractor.Image;
 import org.schabi.newpipe.extractor.ServiceList;
 import org.schabi.newpipe.extractor.StreamingService;
 import org.schabi.newpipe.extractor.kiosk.KioskExtractor;
@@ -23,14 +22,8 @@ import io.reactivex.rxjava3.schedulers.Schedulers;
 /**
  * All YouTube extraction via NewPipe Extractor v0.22.7.
  *
- * ANDROID 9 CRASH FIXES (labelled):
- * A — All operations on Schedulers.io() — never NetworkOnMainThreadException
- * B — Thumbnail extracted via Image.getUrl() (v0.22.7 API), not getThumbnailUrl()
- * C — videoId extraction handles both watch?v= and youtu.be/ URLs
- * D — Kiosk has onErrorResumeNext search fallback
- * E — Stream resolution capped at 720p for smooth API 28 hardware decode
- * F — All List accesses null-checked
- * G — Exception messages null-safe
+ * NOTE: v0.22.7 uses getThumbnailUrl() (String) on StreamInfoItem.
+ *       The Image / getThumbnails() API was added in v0.24+ and must NOT be used here.
  */
 public class YouTubeExtractorService {
 
@@ -53,7 +46,7 @@ public class YouTubeExtractorService {
 
     // ── Search ────────────────────────────────────────────────────────────
 
-    public Single<List<VideoItem>> search(String query) {          // A
+    public Single<List<VideoItem>> search(String query) {
         return Single.fromCallable(() -> runSearch(query)).subscribeOn(Schedulers.io());
     }
 
@@ -65,7 +58,7 @@ public class YouTubeExtractorService {
 
     // ── Trending ──────────────────────────────────────────────────────────
 
-    public Single<List<VideoItem>> getTrending() {                 // A + D
+    public Single<List<VideoItem>> getTrending() {
         return Single.fromCallable(this::runTrending)
                      .subscribeOn(Schedulers.io())
                      .onErrorResumeNext(e -> {
@@ -88,7 +81,7 @@ public class YouTubeExtractorService {
 
     // ── Stream URL ────────────────────────────────────────────────────────
 
-    public Single<String> getStreamUrl(String videoId) {           // A
+    public Single<String> getStreamUrl(String videoId) {
         return Single.fromCallable(() -> resolveStream(videoId)).subscribeOn(Schedulers.io());
     }
 
@@ -98,10 +91,10 @@ public class YouTubeExtractorService {
         try {
             info = StreamInfo.getInfo(mYT, watchUrl);
         } catch (Exception e) {
-            throw new Exception("Extraction failed: " + safe(e), e);  // G
+            throw new Exception("Extraction failed: " + safe(e), e);
         }
 
-        // Pass 1: progressive (video+audio), best ≤ 720p              // E
+        // Pass 1: progressive (video+audio), best <= 720p
         List<VideoStream> progressive = info.getVideoStreams();
         if (progressive != null) {
             String best = null; int bestRes = 0;
@@ -120,7 +113,7 @@ public class YouTubeExtractorService {
         String hls = info.getHlsUrl();
         if (hls != null && !hls.isEmpty()) return hls;
 
-        // Pass 3: video-only adaptive                                  // F
+        // Pass 3: video-only adaptive
         List<VideoStream> adaptive = info.getVideoOnlyStreams();
         if (adaptive != null) {
             for (VideoStream vs : adaptive) {
@@ -135,29 +128,26 @@ public class YouTubeExtractorService {
 
     private List<VideoItem> toItems(List<InfoItem> items) {
         List<VideoItem> out = new ArrayList<>();
-        if (items == null) return out;                                  // F
+        if (items == null) return out;
 
         for (InfoItem item : items) {
             if (!(item instanceof StreamInfoItem)) continue;
             StreamInfoItem si = (StreamInfoItem) item;
 
-            String videoId = videoId(si.getUrl());                     // C
+            String videoId = videoId(si.getUrl());
             if (videoId == null || videoId.isEmpty()) continue;
 
-            // B — correct NewPipe v0.22.7 thumbnail API
+            // v0.22.7 API: getThumbnailUrl() returns a String directly
             String thumb = "";
             try {
-                List<Image> thumbs = si.getThumbnails();
-                if (thumbs != null && !thumbs.isEmpty()) {
-                    thumb = thumbs.get(0).getUrl();
-                    if (thumb == null) thumb = "";
-                }
+                String t = si.getThumbnailUrl();
+                if (t != null) thumb = t;
             } catch (Exception ignored) {}
 
             out.add(new VideoItem(
                 videoId,
-                si.getName()          != null ? si.getName()          : "Unknown",
-                si.getUploaderName()  != null ? si.getUploaderName()  : "",
+                si.getName()              != null ? si.getName()              : "Unknown",
+                si.getUploaderName()      != null ? si.getUploaderName()      : "",
                 thumb,
                 fmtDuration(si.getDuration()),
                 si.getViewCount(),
@@ -169,7 +159,7 @@ public class YouTubeExtractorService {
 
     // ── Utilities ─────────────────────────────────────────────────────────
 
-    private static String videoId(String url) {                        // C
+    private static String videoId(String url) {
         if (url == null) return null;
         int i = url.indexOf("v=");
         if (i >= 0) {
@@ -179,7 +169,11 @@ public class YouTubeExtractorService {
         }
         if (url.contains("youtu.be/")) {
             String[] p = url.split("youtu.be/");
-            if (p.length > 1) { String id = p[1]; int q = id.indexOf('?'); return q < 0 ? id : id.substring(0, q); }
+            if (p.length > 1) {
+                String id = p[1];
+                int q = id.indexOf('?');
+                return q < 0 ? id : id.substring(0, q);
+            }
         }
         return null;
     }
@@ -196,7 +190,8 @@ public class YouTubeExtractorService {
         return h > 0 ? String.format("%d:%02d:%02d",h,m,s) : String.format("%d:%02d",m,s);
     }
 
-    private static String safe(Throwable e) {                         // G
-        return e != null && e.getMessage() != null ? e.getMessage() : e != null ? e.getClass().getSimpleName() : "null";
+    private static String safe(Throwable e) {
+        return e != null && e.getMessage() != null ? e.getMessage()
+             : e != null ? e.getClass().getSimpleName() : "null";
     }
 }
