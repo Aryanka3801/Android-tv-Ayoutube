@@ -1,9 +1,9 @@
 package com.example.myapp;
 
-import android.app.Activity;
 import android.os.Bundle;
+import androidx.appcompat.app.AppCompatActivity;
 
-public class MainActivity extends Activity {
+public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -11,7 +11,7 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         if (savedInstanceState == null) {
-            getFragmentManager()
+            getSupportFragmentManager()
                 .beginTransaction()
                 .replace(R.id.main_browse_fragment, new MainFragment())
                 .commitAllowingStateLoss();
