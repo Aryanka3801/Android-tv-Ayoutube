@@ -8,7 +8,7 @@ android {
 
     defaultConfig {
         applicationId "com.example.myapp"
-        minSdk 28
+        minSdk 21
         targetSdk 34
         versionCode 4
         versionName "4.0"
@@ -73,7 +73,7 @@ dependencies {
     // ── NewPipe Extractor ──────────────────────────────────────────────
     implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.22.7'
 
-    // ── OkHttp ────────────────────────────────────────────────────────
+    // ── OkHttp ───────────────────────────────────────────────────────
     implementation 'com.squareup.okhttp3:okhttp:4.11.0'
 
     // ── Glide ─────────────────────────────────────────────────────────
