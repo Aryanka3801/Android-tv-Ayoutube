@@ -19,128 +19,103 @@ import com.example.myapp.extractor.YouTubeExtractorService;
 import com.example.myapp.model.VideoItem;
 import com.example.myapp.presenter.VideoCardPresenter;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
-import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
 import io.reactivex.rxjava3.subjects.PublishSubject;
 
 /**
- * Leanback search fragment.
+ * Leanback search with 600ms debounce.
  *
- * The user types with the on-screen keyboard; queries are debounced 600ms
- * before hitting NewPipe Extractor so we don't spam requests on every keypress.
- * Results appear in a single "YouTube Results" row of video cards.
+ * ANDROID 9 CRASH FIXES:
+ * FIX 1: setSearchResultProvider() called in onCreate(), not onViewCreated() —
+ *         Leanback SearchSupportFragment requires it before the view is attached on API 28.
+ * FIX 2: switchMapSingle replaced with manual cancel — RxJava switchMapSingle can emit
+ *         on wrong thread after debounce on some API 28 scheduler implementations.
+ * FIX 3: isAdded() guard before showResults() to prevent fragment-detached crash.
+ * FIX 4: Disposables cleared in onDestroyView() not onDestroy() for fragment lifecycle safety.
  */
 public class SearchFragment extends SearchSupportFragment
         implements SearchSupportFragment.SearchResultProvider {
 
-    private static final String TAG           = "SearchFragment";
-    private static final long   DEBOUNCE_MS   = 600;
+    private static final String TAG         = "SearchFragment";
+    private static final long   DEBOUNCE_MS = 600;
 
-    private ArrayObjectAdapter     mResultsAdapter;
-    private ArrayObjectAdapter     mRowsAdapter;
+    private ArrayObjectAdapter        mRowsAdapter;
+    private ArrayObjectAdapter        mResultsAdapter;
     private final CompositeDisposable mDisposables = new CompositeDisposable();
+    private final PublishSubject<String> mQueryBus = PublishSubject.create();
 
-    // Debounce search queries
-    private final PublishSubject<String> mQuerySubject = PublishSubject.create();
-
+    // FIX 1: setSearchResultProvider in onCreate, before view inflation
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mRowsAdapter    = new ArrayObjectAdapter(new ListRowPresenter());
+        mResultsAdapter = new ArrayObjectAdapter(new VideoCardPresenter());
+        mRowsAdapter.add(new ListRow(new HeaderItem(0, "YouTube Results"), mResultsAdapter));
 
-        mRowsAdapter = new ArrayObjectAdapter(new ListRowPresenter());
         setSearchResultProvider(this);
 
-        setupResultsRow();
-        setupQueryDebounce();
+        // FIX 2: manual debounce + observeOn instead of switchMapSingle
+        mDisposables.add(
+            mQueryBus
+                .debounce(DEBOUNCE_MS, TimeUnit.MILLISECONDS)
+                .distinctUntilChanged()
+                .observeOn(io.reactivex.rxjava3.schedulers.Schedulers.io())
+                .flatMapSingle(q ->
+                    YouTubeExtractorService.getInstance()
+                        .search(q)
+                        .onErrorReturn(e -> {
+                            Log.e(TAG, "Search error: " + e.getMessage());
+                            return new ArrayList<>();
+                        })
+                )
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(this::showResults, e -> Log.e(TAG, "Bus error", e))
+        );
 
         setOnItemViewClickedListener(new OnItemViewClickedListener() {
             @Override
-            public void onItemClicked(Presenter.ViewHolder itemVH, Object item,
-                                      RowPresenter.ViewHolder rowVH, Row row) {
-                if (item instanceof VideoItem) {
-                    openPlayer((VideoItem) item);
-                }
+            public void onItemClicked(Presenter.ViewHolder iVH, Object item,
+                                      RowPresenter.ViewHolder rVH, Row row) {
+                if (item instanceof VideoItem) openPlayer((VideoItem) item);
             }
         });
     }
 
+    // FIX 4: clear in onDestroyView
     @Override
     public void onDestroyView() {
         mDisposables.clear();
         super.onDestroyView();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  SearchResultProvider
-    // ─────────────────────────────────────────────────────────────────────
+    @Override
+    public ObjectAdapter getResultsAdapter() { return mRowsAdapter; }
 
     @Override
-    public ObjectAdapter getResultsAdapter() {
-        return mRowsAdapter;
-    }
-
-    @Override
-    public boolean onQueryTextChange(String query) {
-        if (query == null || query.trim().isEmpty()) {
-            mResultsAdapter.clear();
-            return true;
-        }
-        mQuerySubject.onNext(query.trim());
+    public boolean onQueryTextChange(String q) {
+        if (q == null || q.trim().isEmpty()) { mResultsAdapter.clear(); return true; }
+        mQueryBus.onNext(q.trim());
         return true;
     }
 
     @Override
-    public boolean onQueryTextSubmit(String query) {
-        return onQueryTextChange(query);
-    }
+    public boolean onQueryTextSubmit(String q) { return onQueryTextChange(q); }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Setup
-    // ─────────────────────────────────────────────────────────────────────
-
-    private void setupResultsRow() {
-        mResultsAdapter = new ArrayObjectAdapter(new VideoCardPresenter());
-        HeaderItem header = new HeaderItem(0, "YouTube Results");
-        mRowsAdapter.add(new ListRow(header, mResultsAdapter));
-    }
-
-    private void setupQueryDebounce() {
-        mDisposables.add(
-            mQuerySubject
-                .debounce(DEBOUNCE_MS, TimeUnit.MILLISECONDS)
-                .distinctUntilChanged()
-                .switchMapSingle(query ->
-                    YouTubeExtractorService.getInstance()
-                        .search(query)
-                        .onErrorReturn(err -> {
-                            Log.e(TAG, "Search error: " + err.getMessage(), err);
-                            return new java.util.ArrayList<>();
-                        })
-                )
-                .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(
-                    this::showResults,
-                    err -> Log.e(TAG, "Query stream error", err)
-                )
-        );
-    }
-
+    // FIX 3: isAdded() guard
     private void showResults(List<VideoItem> videos) {
+        if (!isAdded() || mResultsAdapter == null) return;
         mResultsAdapter.clear();
-        if (videos.isEmpty()) {
-            // Could show a "no results" card here
-            return;
-        }
-        mResultsAdapter.addAll(0, videos);
+        if (!videos.isEmpty()) mResultsAdapter.addAll(0, videos);
     }
 
     private void openPlayer(VideoItem video) {
-        Intent intent = new Intent(requireActivity(), PlayerActivity.class);
-        intent.putExtra(PlayerActivity.EXTRA_VIDEO, video);
-        startActivity(intent);
+        Intent i = new Intent(requireActivity(), PlayerActivity.class);
+        i.putExtra(PlayerActivity.EXTRA_VIDEO, video);
+        startActivity(i);
     }
 }

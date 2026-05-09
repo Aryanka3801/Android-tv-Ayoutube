@@ -3,16 +3,11 @@ package com.example.myapp;
 import android.os.Bundle;
 import androidx.fragment.app.FragmentActivity;
 
-/**
- * Shell activity that hosts {@link SearchFragment}.
- */
 public class SearchActivity extends FragmentActivity {
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_search);
-
         if (savedInstanceState == null) {
             getSupportFragmentManager()
                 .beginTransaction()

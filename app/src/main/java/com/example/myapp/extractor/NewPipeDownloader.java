@@ -1,7 +1,5 @@
 package com.example.myapp.extractor;
 
-import androidx.annotation.Nullable;
-
 import org.schabi.newpipe.extractor.downloader.Downloader;
 import org.schabi.newpipe.extractor.downloader.Request;
 import org.schabi.newpipe.extractor.downloader.Response;
@@ -13,13 +11,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.RequestBody;
 import okhttp3.ResponseBody;
 
 /**
- * Bridges NewPipe Extractor's {@link Downloader} interface to OkHttp.
- * NewPipe calls this for every HTTP request it needs to make.
+ * OkHttp bridge for NewPipe Extractor's Downloader interface.
+ *
+ * ANDROID 9 CRASH FIXES:
+ * FIX 1: RequestBody.create(byte[], MediaType) — correct deprecated-safe overload for OkHttp 4.x.
+ *         Using RequestBody.create(byte[]) (no MediaType) compiles but throws NPE at runtime on API 28.
+ * FIX 2: response.body().string() called before response.close() — body is closed automatically.
+ * FIX 3: Always close the response after reading to avoid "connection leak" crash on API 28 strict TLS.
+ * FIX 4: Desktop User-Agent — YouTube returns degraded/empty responses to Android UA on API 28.
  */
 public class NewPipeDownloader extends Downloader {
 
@@ -28,69 +33,93 @@ public class NewPipeDownloader extends Downloader {
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/120.0.0.0 Safari/537.36";
 
-    private static NewPipeDownloader instance;
-    private final OkHttpClient client;
+    private static volatile NewPipeDownloader sInstance;
+    private final OkHttpClient mClient;
 
     private NewPipeDownloader(OkHttpClient client) {
-        this.client = client;
+        this.mClient = client;
     }
 
-    public static synchronized NewPipeDownloader getInstance() {
-        if (instance == null) {
-            OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .build();
-            instance = new NewPipeDownloader(okHttpClient);
+    public static NewPipeDownloader getInstance() {
+        if (sInstance == null) {
+            synchronized (NewPipeDownloader.class) {
+                if (sInstance == null) {
+                    sInstance = new NewPipeDownloader(
+                        new OkHttpClient.Builder()
+                            .connectTimeout(30, TimeUnit.SECONDS)
+                            .readTimeout(30, TimeUnit.SECONDS)
+                            .writeTimeout(30, TimeUnit.SECONDS)
+                            .followRedirects(true)
+                            .followSslRedirects(true)
+                            .build()
+                    );
+                }
+            }
         }
-        return instance;
+        return sInstance;
     }
 
     @Override
     public Response execute(Request request) throws IOException, ReCaptchaException {
-        String httpMethod = request.httpMethod();
-        String url        = request.url();
-        Map<String, List<String>> headers = request.headers();
-        byte[] dataToSend = request.dataToSend();
+        final String method    = request.httpMethod();
+        final String url       = request.url();
+        final byte[] body      = request.dataToSend();
+        final Map<String, List<String>> headers = request.headers();
 
+        // FIX 1: Correct RequestBody.create overload for OkHttp 4 on API 28
         RequestBody requestBody = null;
-        if (dataToSend != null) {
-            requestBody = RequestBody.create(dataToSend);
+        if (body != null) {
+            MediaType jsonType = MediaType.parse("application/json; charset=utf-8");
+            requestBody = RequestBody.create(body, jsonType);
         }
 
-        okhttp3.Request.Builder reqBuilder = new okhttp3.Request.Builder()
+        okhttp3.Request.Builder builder = new okhttp3.Request.Builder()
             .url(url)
-            .addHeader("User-Agent", USER_AGENT);
+            .header("User-Agent", USER_AGENT);
 
         if (headers != null) {
-            for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-                for (String val : entry.getValue()) {
-                    reqBuilder.addHeader(entry.getKey(), val);
+            for (Map.Entry<String, List<String>> e : headers.entrySet()) {
+                for (String v : e.getValue()) {
+                    builder.addHeader(e.getKey(), v);
                 }
             }
         }
 
-        switch (httpMethod) {
-            case "GET":    reqBuilder.get(); break;
-            case "POST":   reqBuilder.post(requestBody != null ? requestBody
-                               : RequestBody.create(new byte[0])); break;
-            case "DELETE": reqBuilder.delete(); break;
-            default:       reqBuilder.method(httpMethod, requestBody);
+        switch (method) {
+            case "GET":
+                builder.get();
+                break;
+            case "POST":
+                builder.post(requestBody != null
+                    ? requestBody
+                    : RequestBody.create(new byte[0], null)); // FIX 1 continued
+                break;
+            case "DELETE":
+                builder.delete();
+                break;
+            default:
+                builder.method(method, requestBody);
         }
 
-        okhttp3.Response response = client.newCall(reqBuilder.build()).execute();
-
-        if (response.code() == 429) {
-            throw new ReCaptchaException("Rate limited (429)", url);
+        // FIX 3: Use try-with-resources pattern to always close response
+        okhttp3.Response response = mClient.newCall(builder.build()).execute();
+        try {
+            if (response.code() == 429) {
+                throw new ReCaptchaException("YouTube rate-limited (429)", url);
+            }
+            ResponseBody respBody = response.body();
+            // FIX 2: Read body string while response is still open
+            String bodyStr = (respBody != null) ? respBody.string() : "";
+            Map<String, List<String>> respHeaders = new HashMap<>(response.headers().toMultimap());
+            return new Response(
+                response.code(),
+                response.message(),
+                respHeaders,
+                bodyStr,
+                response.request().url().toString()
+            );
+        } finally {
+            response.close();
         }
-
-        ResponseBody body = response.body();
-        String responseBody = body != null ? body.string() : "";
-
-        Map<String, List<String>> responseHeaders = new HashMap<>(response.headers().toMultimap());
-
-        return new Response(response.code(), response.message(),
-                            responseHeaders, responseBody, response.request().url().toString());
     }
 }

@@ -4,187 +4,199 @@ import android.util.Log;
 
 import com.example.myapp.model.VideoItem;
 
-import org.schabi.newpipe.extractor.NewPipe;
+import org.schabi.newpipe.extractor.InfoItem;
+import org.schabi.newpipe.extractor.Image;
 import org.schabi.newpipe.extractor.ServiceList;
 import org.schabi.newpipe.extractor.StreamingService;
-import org.schabi.newpipe.extractor.channel.tabs.ChannelTabExtractor;
+import org.schabi.newpipe.extractor.kiosk.KioskExtractor;
 import org.schabi.newpipe.extractor.search.SearchExtractor;
-import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeSearchExtractor;
-import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeSearchQueryHandlerFactory;
-import org.schabi.newpipe.extractor.stream.StreamExtractor;
 import org.schabi.newpipe.extractor.stream.StreamInfo;
-import org.schabi.newpipe.extractor.stream.VideoStream;
-import org.schabi.newpipe.extractor.InfoItem;
 import org.schabi.newpipe.extractor.stream.StreamInfoItem;
-import org.schabi.newpipe.extractor.ListExtractor;
+import org.schabi.newpipe.extractor.stream.VideoStream;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
 
 import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 
 /**
- * Thin service layer around NewPipe Extractor.
- * All public methods return RxJava3 Singles — subscribe on IO, observe on main.
+ * All YouTube extraction via NewPipe Extractor v0.22.7.
  *
- * Key operations:
- *  - search(query)          → list of VideoItems
- *  - getTrending()          → trending VideoItems
- *  - getByCategory(query)   → category VideoItems (used for Home recommendations)
- *  - getStreamUrl(videoId)  → best HTTPS stream URL for ExoPlayer
+ * ANDROID 9 CRASH FIXES (labelled):
+ * A — All operations on Schedulers.io() — never NetworkOnMainThreadException
+ * B — Thumbnail extracted via Image.getUrl() (v0.22.7 API), not getThumbnailUrl()
+ * C — videoId extraction handles both watch?v= and youtu.be/ URLs
+ * D — Kiosk has onErrorResumeNext search fallback
+ * E — Stream resolution capped at 720p for smooth API 28 hardware decode
+ * F — All List accesses null-checked
+ * G — Exception messages null-safe
  */
 public class YouTubeExtractorService {
 
     private static final String TAG = "YTExtractor";
-    private static volatile YouTubeExtractorService instance;
-    private final StreamingService youtubeService;
+    private static volatile YouTubeExtractorService sInstance;
+    private final StreamingService mYT;
 
     private YouTubeExtractorService() {
-        // NewPipe.init must already have been called in App.onCreate()
-        youtubeService = ServiceList.YouTube;
+        mYT = ServiceList.YouTube;
     }
 
     public static YouTubeExtractorService getInstance() {
-        if (instance == null) {
+        if (sInstance == null) {
             synchronized (YouTubeExtractorService.class) {
-                if (instance == null) instance = new YouTubeExtractorService();
+                if (sInstance == null) sInstance = new YouTubeExtractorService();
             }
         }
-        return instance;
+        return sInstance;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Search
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Search ────────────────────────────────────────────────────────────
 
-    public Single<List<VideoItem>> search(String query) {
-        return Single.fromCallable(() -> doSearch(query))
-                     .subscribeOn(Schedulers.io());
+    public Single<List<VideoItem>> search(String query) {          // A
+        return Single.fromCallable(() -> runSearch(query)).subscribeOn(Schedulers.io());
     }
 
-    private List<VideoItem> doSearch(String query) throws Exception {
-        SearchExtractor extractor = youtubeService.getSearchExtractor(query);
-        extractor.fetchPage();
-        return parseInfoItems(extractor.getInitialPage().getItems());
+    private List<VideoItem> runSearch(String q) throws Exception {
+        SearchExtractor ex = mYT.getSearchExtractor(q);
+        ex.fetchPage();
+        return toItems(ex.getInitialPage().getItems());
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Trending
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Trending ──────────────────────────────────────────────────────────
 
-    public Single<List<VideoItem>> getTrending() {
-        return Single.fromCallable(this::doGetTrending)
-                     .subscribeOn(Schedulers.io());
+    public Single<List<VideoItem>> getTrending() {                 // A + D
+        return Single.fromCallable(this::runTrending)
+                     .subscribeOn(Schedulers.io())
+                     .onErrorResumeNext(e -> {
+                         Log.w(TAG, "Kiosk failed: " + safe(e) + " — fallback to search");
+                         return search("trending videos today");
+                     });
     }
 
-    private List<VideoItem> doGetTrending() throws Exception {
-        // YouTube kiosk "Trending"
-        org.schabi.newpipe.extractor.kiosk.KioskExtractor kiosk =
-            youtubeService.getKioskList().getDefaultKioskExtractor();
+    private List<VideoItem> runTrending() throws Exception {
+        KioskExtractor kiosk = mYT.getKioskList().getDefaultKioskExtractor();
         kiosk.fetchPage();
-        return parseInfoItems(kiosk.getInitialPage().getItems());
+        return toItems(kiosk.getInitialPage().getItems());
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Category / Recommendation rows (for Home tab)
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Category ──────────────────────────────────────────────────────────
 
-    public Single<List<VideoItem>> getByCategory(String searchQuery) {
-        return search(searchQuery);    // reuses search with category keyword
+    public Single<List<VideoItem>> getByCategory(String query) {
+        return search(query);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Stream URL extraction  (called just before playback)
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Stream URL ────────────────────────────────────────────────────────
 
-    public Single<String> getStreamUrl(String videoId) {
-        return Single.fromCallable(() -> doGetStreamUrl(videoId))
-                     .subscribeOn(Schedulers.io());
+    public Single<String> getStreamUrl(String videoId) {           // A
+        return Single.fromCallable(() -> resolveStream(videoId)).subscribeOn(Schedulers.io());
     }
 
-    private String doGetStreamUrl(String videoId) throws Exception {
+    private String resolveStream(String videoId) throws Exception {
         String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
-        StreamInfo info = StreamInfo.getInfo(youtubeService, watchUrl);
+        StreamInfo info;
+        try {
+            info = StreamInfo.getInfo(mYT, watchUrl);
+        } catch (Exception e) {
+            throw new Exception("Extraction failed: " + safe(e), e);  // G
+        }
 
-        // Prefer a progressive HTTPS video+audio stream (no DASH merge needed)
-        List<VideoStream> videoStreams = info.getVideoStreams();
-
-        String bestUrl = null;
-        int    bestRes = 0;
-
-        for (VideoStream vs : videoStreams) {
-            if (vs.getUrl() == null) continue;
-            if (!vs.getUrl().startsWith("https")) continue;
-            // getResolution() returns e.g. "720p"
-            String resStr = vs.getResolution().replace("p", "");
-            int res = 0;
-            try { res = Integer.parseInt(resStr); } catch (NumberFormatException ignored) {}
-            if (res > bestRes && res <= 1080) {
-                bestRes = res;
-                bestUrl = vs.getUrl();
+        // Pass 1: progressive (video+audio), best ≤ 720p              // E
+        List<VideoStream> progressive = info.getVideoStreams();
+        if (progressive != null) {
+            String best = null; int bestRes = 0;
+            for (VideoStream vs : progressive) {
+                String u = vs.getUrl(); if (u == null || u.isEmpty()) continue;
+                int r = parseRes(vs.getResolution());
+                if (r > bestRes && r <= 720) { bestRes = r; best = u; }
+            }
+            if (best != null) return best;
+            for (VideoStream vs : progressive) {
+                String u = vs.getUrl(); if (u != null && !u.isEmpty()) return u;
             }
         }
 
-        if (bestUrl == null && !videoStreams.isEmpty()) {
-            bestUrl = videoStreams.get(0).getUrl();
+        // Pass 2: HLS
+        String hls = info.getHlsUrl();
+        if (hls != null && !hls.isEmpty()) return hls;
+
+        // Pass 3: video-only adaptive                                  // F
+        List<VideoStream> adaptive = info.getVideoOnlyStreams();
+        if (adaptive != null) {
+            for (VideoStream vs : adaptive) {
+                String u = vs.getUrl(); if (u != null && !u.isEmpty()) return u;
+            }
         }
 
-        // Fall back to HLS manifest if no progressive stream found
-        if (bestUrl == null) {
-            String hlsUrl = info.getHlsUrl();
-            if (hlsUrl != null && !hlsUrl.isEmpty()) return hlsUrl;
-            throw new Exception("No playable stream found for " + videoId);
-        }
-
-        return bestUrl;
+        throw new Exception("No playable stream for " + videoId);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Helpers
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Item parsing ──────────────────────────────────────────────────────
 
-    private List<VideoItem> parseInfoItems(List<InfoItem> items) {
-        List<VideoItem> result = new ArrayList<>();
+    private List<VideoItem> toItems(List<InfoItem> items) {
+        List<VideoItem> out = new ArrayList<>();
+        if (items == null) return out;                                  // F
+
         for (InfoItem item : items) {
-            if (item instanceof StreamInfoItem) {
-                StreamInfoItem si = (StreamInfoItem) item;
-                String thumbnail = si.getThumbnails().isEmpty()
-                    ? "" : si.getThumbnails().get(0).getUrl();
-                String duration = formatDuration(si.getDuration());
-                String videoId  = extractVideoId(si.getUrl());
-                if (videoId == null) continue;
-                result.add(new VideoItem(
-                    videoId,
-                    si.getName(),
-                    si.getUploaderName(),
-                    thumbnail,
-                    duration,
-                    si.getViewCount(),
-                    si.getTextualUploadDate() != null ? si.getTextualUploadDate() : ""
-                ));
-            }
+            if (!(item instanceof StreamInfoItem)) continue;
+            StreamInfoItem si = (StreamInfoItem) item;
+
+            String videoId = videoId(si.getUrl());                     // C
+            if (videoId == null || videoId.isEmpty()) continue;
+
+            // B — correct NewPipe v0.22.7 thumbnail API
+            String thumb = "";
+            try {
+                List<Image> thumbs = si.getThumbnails();
+                if (thumbs != null && !thumbs.isEmpty()) {
+                    thumb = thumbs.get(0).getUrl();
+                    if (thumb == null) thumb = "";
+                }
+            } catch (Exception ignored) {}
+
+            out.add(new VideoItem(
+                videoId,
+                si.getName()          != null ? si.getName()          : "Unknown",
+                si.getUploaderName()  != null ? si.getUploaderName()  : "",
+                thumb,
+                fmtDuration(si.getDuration()),
+                si.getViewCount(),
+                si.getTextualUploadDate() != null ? si.getTextualUploadDate() : ""
+            ));
         }
-        return result;
+        return out;
     }
 
-    private String formatDuration(long seconds) {
-        if (seconds <= 0) return "";
-        long h = seconds / 3600;
-        long m = (seconds % 3600) / 60;
-        long s = seconds % 60;
-        if (h > 0) return String.format("%d:%02d:%02d", h, m, s);
-        return String.format("%d:%02d", m, s);
-    }
+    // ── Utilities ─────────────────────────────────────────────────────────
 
-    private String extractVideoId(String url) {
-        // handles https://www.youtube.com/watch?v=XXXXXXXXXXX
+    private static String videoId(String url) {                        // C
         if (url == null) return null;
-        int idx = url.indexOf("v=");
-        if (idx < 0) return null;
-        String id = url.substring(idx + 2);
-        int amp = id.indexOf('&');
-        return amp < 0 ? id : id.substring(0, amp);
+        int i = url.indexOf("v=");
+        if (i >= 0) {
+            String id = url.substring(i + 2);
+            int a = id.indexOf('&');
+            return a < 0 ? id : id.substring(0, a);
+        }
+        if (url.contains("youtu.be/")) {
+            String[] p = url.split("youtu.be/");
+            if (p.length > 1) { String id = p[1]; int q = id.indexOf('?'); return q < 0 ? id : id.substring(0, q); }
+        }
+        return null;
+    }
+
+    private static int parseRes(String r) {
+        if (r == null) return 0;
+        try { return Integer.parseInt(r.replaceAll("[^0-9]", "")); }
+        catch (NumberFormatException e) { return 0; }
+    }
+
+    private static String fmtDuration(long sec) {
+        if (sec <= 0) return "";
+        long h = sec/3600, m = (sec%3600)/60, s = sec%60;
+        return h > 0 ? String.format("%d:%02d:%02d",h,m,s) : String.format("%d:%02d",m,s);
+    }
+
+    private static String safe(Throwable e) {                         // G
+        return e != null && e.getMessage() != null ? e.getMessage() : e != null ? e.getClass().getSimpleName() : "null";
     }
 }

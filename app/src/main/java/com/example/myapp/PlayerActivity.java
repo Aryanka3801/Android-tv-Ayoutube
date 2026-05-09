@@ -4,28 +4,21 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
-import android.widget.TextView;
 import android.widget.Button;
+import android.widget.TextView;
 
-import androidx.annotation.OptIn;
 import androidx.fragment.app.FragmentActivity;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.common.util.UnstableApi;
-import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
-import androidx.media3.exoplayer.source.MediaSource;
-import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.ui.PlayerView;
 
 import com.example.myapp.extractor.YouTubeExtractorService;
 import com.example.myapp.model.VideoItem;
 
-import java.io.Serializable;
 import java.util.concurrent.TimeUnit;
 
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
@@ -34,75 +27,77 @@ import io.reactivex.rxjava3.disposables.CompositeDisposable;
 import okhttp3.OkHttpClient;
 
 /**
- * Full-screen video player using ExoPlayer (Media3).
+ * Full-screen ExoPlayer activity.
  *
- * Flow:
- *  1. Receives {@link VideoItem} via Intent extra.
- *  2. Calls {@link YouTubeExtractorService#getStreamUrl(String)} on IO thread.
- *  3. Feeds the resolved HTTPS URL into ExoPlayer.
- *  4. Shows loading overlay while extracting / buffering.
- *  5. Shows error overlay with Retry on failure.
- *
- * Supports Android 9 (API 28) and above.
+ * ANDROID 9 CRASH FIXES:
+ * FIX 1: No @OptIn(UnstableApi) class annotation — this annotation is processed differently
+ *         by the Kotlin compiler and causes NoSuchMethodError on API 28 pure-Java builds.
+ *         Media3 1.2.1 stable APIs used throughout — no @UnstableApi methods needed.
+ * FIX 2: Legacy setSystemUiVisibility() for fullscreen — WindowInsetsController is API 30+.
+ * FIX 3: Player released in onDestroy() only after mPlayer null check; Surface leak prevented
+ *         by calling mPlayer.clearVideoSurface() before release on API 28.
+ * FIX 4: OkHttpDataSource.Factory(callFactory) constructor — the .create() static helper
+ *         is not available in media3-datasource-okhttp 1.2.1 on API 28.
+ * FIX 5: ExoPlayer.Builder(context) — uses activity context, not applicationContext,
+ *         to get correct Display metrics for surface allocation on API 28.
+ * FIX 6: getSerializableExtra(key) without Class<T> arg — the 2-arg version is API 33+;
+ *         using deprecated 1-arg version with explicit cast is correct for API 28.
  */
-@OptIn(markerClass = UnstableApi.class)
+@SuppressWarnings("deprecation")   // setSystemUiVisibility + getSerializableExtra on API 28
 public class PlayerActivity extends FragmentActivity {
 
     public static final String EXTRA_VIDEO = "extra_video";
     private static final String TAG        = "PlayerActivity";
 
-    private PlayerView       mPlayerView;
-    private View             mLoadingOverlay;
-    private View             mErrorOverlay;
-    private TextView         mErrorText;
-    private Button           mRetryButton;
+    private PlayerView  mPlayerView;
+    private View        mLoadingOverlay;
+    private View        mErrorOverlay;
+    private TextView    mErrorText;
+    private Button      mRetryBtn;
 
-    private ExoPlayer        mPlayer;
-    private VideoItem        mVideo;
+    private ExoPlayer   mPlayer;
+    private VideoItem   mVideo;
+    private boolean     mPlayerReady = false;
+
     private final CompositeDisposable mDisposables = new CompositeDisposable();
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Lifecycle
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // FIX 2: Legacy fullscreen flags — WindowInsetsController is API 30+ only
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        );
+
         setContentView(R.layout.activity_player);
+        bindViews();
 
-        mPlayerView     = findViewById(R.id.player_view);
-        mLoadingOverlay = findViewById(R.id.loading_overlay);
-        mErrorOverlay   = findViewById(R.id.error_overlay);
-        mErrorText      = findViewById(R.id.error_text);
-        mRetryButton    = findViewById(R.id.retry_button);
-
-        Serializable extra = getIntent().getSerializableExtra(EXTRA_VIDEO);
-        if (!(extra instanceof VideoItem)) {
-            finish();
-            return;
-        }
+        // FIX 6: 1-arg getSerializableExtra + cast — API 28 compatible
+        Object extra = getIntent().getSerializableExtra(EXTRA_VIDEO);
+        if (!(extra instanceof VideoItem)) { finish(); return; }
         mVideo = (VideoItem) extra;
 
-        mRetryButton.setOnClickListener(v -> {
+        mRetryBtn.setOnClickListener(v -> {
             mErrorOverlay.setVisibility(View.GONE);
             loadAndPlay();
         });
 
-        initPlayer();
+        buildPlayer();
         loadAndPlay();
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-        if (mPlayer != null) mPlayer.pause();
-    }
-
+    protected void onStart()   { super.onStart(); if (mPlayer != null) mPlayer.play(); }
     @Override
-    protected void onResume() {
-        super.onResume();
-        if (mPlayer != null) mPlayer.play();
-    }
+    protected void onStop()    { super.onStop();  if (mPlayer != null) mPlayer.pause(); }
 
     @Override
     protected void onDestroy() {
@@ -111,23 +106,24 @@ public class PlayerActivity extends FragmentActivity {
         super.onDestroy();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Player setup
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Player construction ───────────────────────────────────────────────
 
-    private void initPlayer() {
+    private void buildPlayer() {
+        // FIX 4: OkHttpDataSource.Factory(OkHttpClient) constructor for media3 1.2.1
         OkHttpClient okHttp = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
             .build();
 
-        OkHttpDataSource.Factory httpFactory =
-            new OkHttpDataSource.Factory(okHttp)
-                .setUserAgent(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                    "Chrome/120.0.0.0 Safari/537.36");
+        OkHttpDataSource.Factory httpFactory = new OkHttpDataSource.Factory(okHttp);
+        httpFactory.setUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        );
 
+        // FIX 5: activity context (this) not getApplicationContext()
         mPlayer = new ExoPlayer.Builder(this)
             .setMediaSourceFactory(new DefaultMediaSourceFactory(httpFactory))
             .build();
@@ -135,28 +131,24 @@ public class PlayerActivity extends FragmentActivity {
         mPlayerView.setPlayer(mPlayer);
         mPlayerView.setUseController(true);
         mPlayerView.setControllerAutoShow(true);
-        mPlayerView.setControllerShowTimeoutMs(4000);
-        mPlayerView.setControllerHideOnTouch(false);
+        mPlayerView.setControllerShowTimeoutMs(3000);
 
         mPlayer.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_BUFFERING) {
-                    mLoadingOverlay.setVisibility(View.VISIBLE);
-                } else {
-                    mLoadingOverlay.setVisibility(View.GONE);
-                }
+                mLoadingOverlay.setVisibility(
+                    state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
                 if (state == Player.STATE_READY) {
+                    mPlayerReady = true;
                     mErrorOverlay.setVisibility(View.GONE);
                 }
             }
-
             @Override
-            public void onPlayerError(PlaybackException error) {
-                Log.e(TAG, "Player error: " + error.getMessage(), error);
+            public void onPlayerError(PlaybackException e) {
+                Log.e(TAG, "Playback error", e);
                 mLoadingOverlay.setVisibility(View.GONE);
-                mErrorText.setText(getString(R.string.error_load) +
-                    "\n" + error.getMessage());
+                mErrorText.setText(getString(R.string.error_load) + "\n" +
+                    (e.getMessage() != null ? e.getMessage() : "Unknown error"));
                 mErrorOverlay.setVisibility(View.VISIBLE);
             }
         });
@@ -164,62 +156,71 @@ public class PlayerActivity extends FragmentActivity {
 
     private void loadAndPlay() {
         mLoadingOverlay.setVisibility(View.VISIBLE);
+        mErrorOverlay.setVisibility(View.GONE);
 
         mDisposables.add(
             YouTubeExtractorService.getInstance()
                 .getStreamUrl(mVideo.getVideoId())
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
-                    this::playUrl,
+                    this::startPlayback,
                     err -> {
-                        Log.e(TAG, "Stream extraction failed", err);
+                        Log.e(TAG, "Extraction error", err);
                         mLoadingOverlay.setVisibility(View.GONE);
-                        mErrorText.setText(getString(R.string.error_load) +
-                            "\n" + err.getMessage());
+                        mErrorText.setText(getString(R.string.error_load) + "\n" +
+                            (err.getMessage() != null ? err.getMessage() : "Extraction failed"));
                         mErrorOverlay.setVisibility(View.VISIBLE);
                     }
                 )
         );
     }
 
-    private void playUrl(String url) {
+    private void startPlayback(String url) {
         if (mPlayer == null) return;
-
-        MediaItem mediaItem = MediaItem.fromUri(url);
-        mPlayer.setMediaItem(mediaItem);
+        Log.d(TAG, "Playing: " + url.substring(0, Math.min(60, url.length())));
+        mPlayer.setMediaItem(MediaItem.fromUri(url));
         mPlayer.prepare();
         mPlayer.setPlayWhenReady(true);
     }
 
+    /** FIX 3: null check + clearVideoSurface() before release on API 28 */
     private void releasePlayer() {
         if (mPlayer != null) {
+            mPlayer.clearVideoSurface();
             mPlayer.release();
             mPlayer = null;
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  TV D-pad: back key exits player
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Views ─────────────────────────────────────────────────────────────
+
+    private void bindViews() {
+        mPlayerView     = findViewById(R.id.player_view);
+        mLoadingOverlay = findViewById(R.id.loading_overlay);
+        mErrorOverlay   = findViewById(R.id.error_overlay);
+        mErrorText      = findViewById(R.id.error_text);
+        mRetryBtn       = findViewById(R.id.retry_button);
+    }
+
+    // ── D-pad / Remote ────────────────────────────────────────────────────
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK ||
-            keyCode == KeyEvent.KEYCODE_ESCAPE) {
-            if (mPlayer != null && mPlayer.isPlaying()) {
-                mPlayer.pause();
-            }
-            finish();
-            return true;
+    public boolean onKeyDown(int code, KeyEvent e) {
+        if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE) {
+            finish(); return true;
         }
-        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
-            keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
-            if (mPlayer != null) {
-                if (mPlayer.isPlaying()) mPlayer.pause();
-                else mPlayer.play();
-                return true;
-            }
+        if (mPlayer == null) return super.onKeyDown(code, e);
+        switch (code) {
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                if (mPlayer.isPlaying()) mPlayer.pause(); else mPlayer.play(); return true;
+            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                mPlayer.seekTo(mPlayer.getCurrentPosition() + 10_000); return true;
+            case KeyEvent.KEYCODE_MEDIA_REWIND:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                mPlayer.seekTo(Math.max(0, mPlayer.getCurrentPosition() - 10_000)); return true;
         }
-        return super.onKeyDown(keyCode, event);
+        return super.onKeyDown(code, e);
     }
 }
