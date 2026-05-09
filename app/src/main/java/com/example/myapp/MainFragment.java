@@ -5,6 +5,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
+import android.widget.Toast;
 
 import androidx.leanback.app.BrowseSupportFragment;
 import androidx.leanback.widget.ArrayObjectAdapter;
@@ -30,20 +31,23 @@ import io.reactivex.rxjava3.disposables.CompositeDisposable;
 /**
  * Main browse screen — 8 tabs: Home, Trending, Music, Gaming, News, Sports, Comedy, Education.
  *
- * ANDROID 9 CRASH FIXES:
+ * ANDROID 9 BLANK SCREEN FIX:
  * FIX 1: Uses onViewCreated() not deprecated onActivityCreated().
- *         onActivityCreated() was removed in API 28 strict fragment lifecycle enforcement.
  * FIX 2: isAdded() guard in fillRow() — fragment can detach between IO callback and UI update.
  * FIX 3: mRowsAdapter null check before every access.
- * FIX 4: CompositeDisposable cleared in onDestroyView() (not onDestroy()) to match fragment lifecycle.
+ * FIX 4: CompositeDisposable cleared in onDestroyView() (not onDestroy()).
  * FIX 5: All network calls go through RxJava IO scheduler — no NetworkOnMainThreadException.
+ * FIX 6: view.post() defers setup to next frame — BrowseSupportFragment's internal RecyclerView
+ *         is NOT ready synchronously on API 28 (Android 9). Calling setAdapter() before layout
+ *         completes causes a permanently blank screen. Posting to the next frame fixes this.
+ * FIX 7: Errors shown as Toast ‒ silent log errors caused "why is screen blank?" confusion.
  */
 public class MainFragment extends BrowseSupportFragment {
 
     private static final String TAG = "MainFragment";
 
     private static final String[] TAB_NAMES = {
-        "Home", "Trending", "Music", "Gaming", "News", "Sports", "Comedy", "Education"
+        "Home", "Trending", "Music", "Gaming", "News", "Sports", "Comedy(Education"
     };
     private static final String[] TAB_QUERIES = {
         null,                        // Home: built from prefs
@@ -60,21 +64,30 @@ public class MainFragment extends BrowseSupportFragment {
     private final CompositeDisposable mDisposables = new CompositeDisposable();
     private UserPreferences           mPrefs;
 
-    // FIX 1: onViewCreated, NOT onActivityCreated
+    // FIX 1 + FIX 6: onViewCreated with view.post() for Android 9 blank screen fix
     @Override
     public void onViewCreated(View view, Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         mPrefs = new UserPreferences(requireContext());
-        setupUI();
-        setupListeners();
-        buildSkeletonRows();
-        loadAllRows();
+
+        // FIX 6: Post to next frame — critical for Android 9 (API 28).
+        // BrowseSupportFragment's internal RecyclerView finishes layout AFTER
+        // onViewCreated returns. Setting the adapter synchronously here causes
+        // the Leanback BrowseFrameLayout to never display rows — blank screen.
+        view.post(() -> {
+            if (!isAdded()) return;
+            setupUI();
+            setupListeners();
+            buildSkeletonRows();
+            loadAllRows();
+        });
     }
 
     // FIX 4: clear disposables in onDestroyView
     @Override
     public void onDestroyView() {
         mDisposables.clear();
+        mRowsAdapter = null;
         super.onDestroyView();
     }
 
@@ -105,6 +118,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     /** Create empty rows immediately so headers appear before data loads */
     private void buildSkeletonRows() {
+        if (mRowsAdapter == null) return;
         mRowsAdapter.clear();
         for (int i = 0; i < TAB_NAMES.length; i++) {
             ArrayObjectAdapter row = new ArrayObjectAdapter(new VideoCardPresenter());
@@ -126,7 +140,10 @@ public class MainFragment extends BrowseSupportFragment {
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
                     vids -> fillRow(1, vids),
-                    err  -> Log.e(TAG, "Trending: " + err.getMessage())
+                    err  -> {
+                        Log.e(TAG, "Trending: " + err.getMessage());
+                        showError("Trending failed: " + err.getMessage());
+                    }
                 )
         );
 
@@ -142,7 +159,11 @@ public class MainFragment extends BrowseSupportFragment {
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
                     vids -> fillRow(idx, vids),
-                    err  -> Log.e(TAG, TAB_NAMES[idx] + ": " + err.getMessage())
+                    err  -> {
+                        Log.e(TAG, TAB_NAMES[idx] + ": " + err.getMessage());
+                        // FIX 7: Show toast so blank screen gives a hint on Android 9
+                        showError(TAB_NAMES[idx] + " failed – check internet");
+                    }
                 )
         );
     }
@@ -163,5 +184,11 @@ public class MainFragment extends BrowseSupportFragment {
         Intent i = new Intent(requireActivity(), PlayerActivity.class);
         i.putExtra(PlayerActivity.EXTRA_VIDEO, video);
         startActivity(i);
+    }
+
+    // FIX 7: surface errors to user instead of silently logging
+    private void showError(String msg) {
+        if (!isAdded()) return;
+        Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show();
     }
 }
