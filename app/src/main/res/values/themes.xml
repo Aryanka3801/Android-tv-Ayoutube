@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Leanback theme required for Android TV -->
-    <style name="Theme.Leanback" parent="@style/Theme.Leanback">
+    <style name="AppTheme" parent="@style/Theme.Leanback">
         <item name="colorPrimary">@color/colorPrimary</item>
         <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
         <item name="colorAccent">@color/colorAccent</item>
