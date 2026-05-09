@@ -1,11 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- TV requires touch to be optional -->
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
-    <!-- Declare this is a Leanback (TV) app -->
     <uses-feature
         android:name="android.software.leanback"
         android:required="true" />
@@ -15,8 +13,9 @@
         android:banner="@drawable/app_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Leanback">
+        android:theme="@style/AppTheme">
 
         <activity
             android:name=".MainActivity"
@@ -25,7 +24,6 @@
             android:configChanges="keyboard|keyboardHidden|navigation|screenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <!-- Leanback launcher shows on Android TV home screen -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
